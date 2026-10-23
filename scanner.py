@@ -61,10 +61,13 @@ except ImportError:
 
 PHP_CVES = "CVE-2026-109618 / CVE-2026-109619"
 REACT_CVES = "CVE-2025-55182 / CVE-2025-66478"
+REACT_ROUTER_CVES = "CVE-2026-42211"
 PHP_DEFAULT_PATH = "/index.php"
 REACT_DEFAULT_PATH = "/"
+REACT_ROUTER_DEFAULT_PATH = "/"
 PHP_DEFAULT_TIMEOUT = 60
 REACT_DEFAULT_TIMEOUT = 10
+REACT_ROUTER_DEFAULT_TIMEOUT = 10
 REACT_TIMEOUT_MESSAGE = "permintaan timeout"
 
 PHP_PHPMYADMIN_PATH = "/show_config_errors.php"
@@ -84,6 +87,23 @@ PHP_WRITE_BUFFER_HIGH_WATER = 256 << 10
 PHP_WRITE_BUFFER_LOW_WATER = 64 << 10
 REACT_BODY_READ_LIMIT = 1 << 20
 REACT_REQUEST_BODY_EXCERPT = 4096
+REACT_ROUTER_BODY_LIMIT = 256 << 10
+REACT_ROUTER_FIXED_VERSION = (7, 14, 2)
+REACT_ROUTER_AFFECTED_MIN = (7, 0, 0)
+REACT_ROUTER_MARKERS = (
+    b"__reactroutercontext",
+    b"__reactroutermanifest",
+    b"__reactrouterroutemodules",
+)
+REACT_ROUTER_MANIFEST_PATH_PATTERN = re.compile(
+    r'"manifestPath"\s*:\s*"([^"]+)"'
+)
+REACT_ROUTER_VERSION_PATTERNS = (
+    re.compile(r'__reactRouterVersion"?\s*[:=]\s*"(\d+\.\d+\.\d+)"'),
+    re.compile(r"react-router@(\d+\.\d+\.\d+)"),
+    re.compile(r"react-router/(\d+\.\d+\.\d+)/"),
+    re.compile(r'"react-router"\s*:\s*"[~^]?(\d+\.\d+\.\d+)"'),
+)
 MAX_RETRIES = 10
 MAX_TIMEOUT = 3600
 MAX_RETRY_BACKOFF = 60.0
@@ -538,6 +558,7 @@ def collect_fingerprint(
         "server": None,
         "powered_by": None,
         "tech": [],
+        "router_version": None,
         "waf": [],
         "challenge": False,
         "blocked": False,
@@ -652,6 +673,14 @@ def collect_fingerprint(
             cookie_header = header_map.get("set-cookie", "").lower()
             if "phpsessid" in cookie_header:
                 tech.append("PHP")
+            body_text = body.decode("utf-8", "replace")
+            router_version = react_router_extract_version(
+                body_text, header_map
+            )
+            if router_version or any(
+                marker in body_lower for marker in REACT_ROUTER_MARKERS
+            ):
+                tech.append("React Router")
 
             if error:
                 result["error"] = error
@@ -659,6 +688,7 @@ def collect_fingerprint(
             result["server"] = header_map.get("server")
             result["powered_by"] = header_map.get("x-powered-by")
             result["tech"] = tech
+            result["router_version"] = router_version
             result["waf"] = waf
             result["challenge"] = challenge
             result["blocked"] = blocked
@@ -2106,6 +2136,383 @@ def react_check_vulnerability(
 
 
 # ---------------------------------------------------------------------------
+# Engine React Router: CVE-2026-42211
+# ---------------------------------------------------------------------------
+
+
+def react_router_extract_version(
+    text: str, headers: Optional[Dict[str, str]] = None
+) -> Optional[str]:
+    if headers:
+        for name in ("x-react-router-version", "x-powered-by"):
+            value = header_value(headers, name)
+            if value:
+                match = re.search(r"(\d+\.\d+\.\d+)", value)
+                if match:
+                    return match.group(1)
+    for pattern in REACT_ROUTER_VERSION_PATTERNS:
+        match = pattern.search(text)
+        if match:
+            return match.group(1)
+    return None
+
+
+def react_router_parse_version(
+    value: Optional[str],
+) -> Optional[Tuple[int, int, int]]:
+    if not value:
+        return None
+    parts = value.split(".")
+    if len(parts) != 3:
+        return None
+    try:
+        parsed = tuple(int(part) for part in parts)
+    except ValueError:
+        return None
+    return (parsed[0], parsed[1], parsed[2])
+
+
+def react_router_version_status(value: Optional[str]) -> Optional[bool]:
+    parsed = react_router_parse_version(value)
+    if parsed is None:
+        return None
+    if parsed < REACT_ROUTER_AFFECTED_MIN:
+        return False
+    return parsed < REACT_ROUTER_FIXED_VERSION
+
+
+def react_router_detect(
+    body: bytes, headers: Optional[Dict[str, str]] = None
+) -> dict:
+    text = body.decode("utf-8", "replace")
+    lower = body.lower()
+    evidence = [
+        marker.decode("ascii")
+        for marker in REACT_ROUTER_MARKERS
+        if marker in lower
+    ]
+    version = react_router_extract_version(text, headers)
+    manifest_path = "/__manifest"
+    match = REACT_ROUTER_MANIFEST_PATH_PATTERN.search(text)
+    if match:
+        candidate = match.group(1)
+        parsed = urlsplit(candidate)
+        if parsed.scheme or parsed.netloc:
+            candidate = parsed.path
+        if candidate.startswith("/"):
+            manifest_path = candidate
+    return {
+        "detected": bool(evidence),
+        "mode": "framework" if evidence else None,
+        "version": version,
+        "affected": react_router_version_status(version),
+        "manifest_path": manifest_path,
+        "manifest_checked": False,
+        "evidence": evidence,
+    }
+
+
+def react_router_get_once(
+    url: str,
+    headers: Dict[str, str],
+    timeout: int,
+    verify_ssl: bool,
+) -> Tuple[Optional[requests.Response], bytes, Optional[str]]:
+    attempts = max(0, RUNTIME.retries) + 1
+    response: Optional[requests.Response] = None
+    body = b""
+    error: Optional[str] = None
+
+    for attempt in range(attempts):
+        response = None
+        body = b""
+        error = None
+        RUNTIME.wait()
+        try:
+            response = requests.get(
+                url,
+                headers=headers,
+                timeout=timeout,
+                verify=verify_ssl,
+                allow_redirects=False,
+                stream=True,
+                proxies=request_proxies(),
+            )
+            body = (
+                response.raw.read(
+                    REACT_ROUTER_BODY_LIMIT, decode_content=True
+                )
+                or b""
+            )
+            response._content = body
+            response._content_consumed = True
+            response.close()
+        except requests.exceptions.SSLError as exc:
+            error = f"kesalahan SSL: {exc}"
+        except requests.exceptions.ConnectionError as exc:
+            error = f"kesalahan koneksi: {exc}"
+        except requests.exceptions.Timeout:
+            error = REACT_TIMEOUT_MESSAGE
+        except RequestException as exc:
+            error = f"permintaan gagal: {exc}"
+        except Exception as exc:
+            error = f"kesalahan tak terduga: {exc}"
+
+        if attempt + 1 >= attempts or not react_should_retry(response, error):
+            return response, body, error
+
+        retry_after = None
+        if response is not None:
+            retry_after = retry_after_seconds(
+                {name: value for name, value in response.headers.items()}
+            )
+            response.close()
+        RUNTIME.backoff(attempt, retry_after)
+
+    return response, body, error
+
+
+def react_router_fetch(
+    url: str,
+    headers: Dict[str, str],
+    timeout: int,
+    verify_ssl: bool,
+    max_redirects: int = 10,
+) -> Tuple[Optional[requests.Response], bytes, str, Optional[str]]:
+    current_url = url
+    original = urlsplit(url)
+    response: Optional[requests.Response] = None
+    body = b""
+
+    for _ in range(max_redirects + 1):
+        response, body, error = react_router_get_once(
+            current_url, headers, timeout, verify_ssl
+        )
+        if error:
+            return response, body, current_url, error
+
+        location = response.headers.get("Location")
+        if (
+            response.status_code not in (301, 302, 303, 307, 308)
+            or not location
+        ):
+            return response, body, current_url, None
+
+        next_url = urljoin(current_url, location)
+        next_parsed = urlsplit(next_url)
+        if next_parsed.scheme not in ("http", "https"):
+            return response, body, current_url, None
+        if next_parsed.netloc != original.netloc:
+            return response, body, current_url, None
+        if original.scheme == "https" and next_parsed.scheme != "https":
+            return response, body, current_url, None
+        current_url = next_url
+
+    return response, body, current_url, None
+
+
+def react_router_request_dump(url: str, headers: Dict[str, str]) -> str:
+    parsed = urlparse(url)
+    target = parsed.path or "/"
+    if parsed.query:
+        target += "?" + parsed.query
+    lines = [f"GET {target} HTTP/1.1", f"Host: {parsed.netloc}"]
+    for key, value in headers.items():
+        lines.append(f"{key}: {redact_header(key, value)}")
+    return "\r\n".join(lines) + "\r\n"
+
+
+def react_router_response_dump(
+    response: requests.Response, body: bytes
+) -> str:
+    text = body.decode("utf-8", "replace")
+    lines = [f"HTTP/1.1 {response.status_code} {response.reason}"]
+    for key, value in response.headers.items():
+        lines.append(f"{key}: {redact_header(key, value)}")
+    return "\r\n".join(lines) + "\r\n\r\n" + text[:2000]
+
+
+def react_router_base_result(host: str) -> dict:
+    return {
+        "engine": "react-router",
+        "cve": REACT_ROUTER_CVES,
+        "host": host,
+        "vulnerable": None,
+        "verdict": "ERROR",
+        "status_code": None,
+        "error": None,
+        "reason": None,
+        "request": None,
+        "response": None,
+        "final_url": None,
+        "tested_url": None,
+        "framework": None,
+        "timestamp": utc_now(),
+    }
+
+
+def react_router_check_vulnerability(
+    host: str,
+    timeout: int = REACT_ROUTER_DEFAULT_TIMEOUT,
+    verify_ssl: bool = True,
+    custom_headers: Optional[Dict[str, str]] = None,
+    paths: Optional[List[str]] = None,
+) -> dict:
+    display_host = safe_url_label(host)
+    result = react_router_base_result(display_host)
+
+    try:
+        normalized = normalize_url(host, REACT_ROUTER_DEFAULT_PATH)
+    except ValueError as exc:
+        result["error"] = str(exc)
+        result["reason"] = str(exc)
+        return result
+
+    result["host"] = normalized
+    base_path = urlsplit(normalized).path or REACT_ROUTER_DEFAULT_PATH
+    test_paths = paths if paths else [base_path]
+
+    headers = {
+        "User-Agent": FINGERPRINT_USER_AGENT,
+        "Accept": "text/html,application/xhtml+xml,application/json;q=0.9,*/*;q=0.8",
+    }
+    if custom_headers:
+        for name, value in custom_headers.items():
+            if name.lower() != "proxy-authorization":
+                set_header(headers, name, value)
+
+    for idx, path in enumerate(test_paths):
+        path = path if path.startswith("/") else "/" + path
+        test_url = replace_path(
+            normalized, path, REACT_ROUTER_DEFAULT_PATH
+        )
+        result["tested_url"] = test_url
+        result["final_url"] = test_url
+        result["request"] = react_router_request_dump(test_url, headers)
+
+        response, body, final_url, error = react_router_fetch(
+            test_url, headers, timeout, verify_ssl
+        )
+
+        if error:
+            if response is not None:
+                response.close()
+            if idx < len(test_paths) - 1:
+                continue
+            result["error"] = error
+            result["reason"] = error
+            result["verdict"] = "ERROR"
+            return result
+
+        result["final_url"] = final_url
+        result["status_code"] = response.status_code
+        result["response"] = react_router_response_dump(response, body)
+
+        if response.status_code in REACT_BLOCKED_STATUSES:
+            if idx < len(test_paths) - 1:
+                continue
+            result["vulnerable"] = None
+            result["verdict"] = "INCONCLUSIVE"
+            result["reason"] = (
+                f"respons HTTP {response.status_code} dapat berupa blokir "
+                "WAF/autentikasi; keberadaan React Router tidak dapat "
+                "dipastikan"
+            )
+            return result
+
+        detection = react_router_detect(
+            body, {name: value for name, value in response.headers.items()}
+        )
+
+        if not detection["detected"]:
+            if idx < len(test_paths) - 1:
+                continue
+            result["framework"] = detection
+            result["vulnerable"] = False
+            result["verdict"] = "NOT VULNERABLE"
+            result["reason"] = (
+                "React Router Framework Mode tidak terdeteksi; CVE-2026-42211 "
+                "tidak dapat dikonfirmasi"
+            )
+            return result
+
+        manifest_url = urljoin(final_url, detection["manifest_path"])
+        manifest_parsed = urlsplit(manifest_url)
+        final_parsed = urlsplit(final_url)
+        if (
+            manifest_parsed.scheme in ("http", "https")
+            and manifest_parsed.netloc == final_parsed.netloc
+            and not (
+                final_parsed.scheme == "https"
+                and manifest_parsed.scheme != "https"
+            )
+        ):
+            manifest_response, manifest_body, _, manifest_error = (
+                react_router_fetch(
+                    manifest_url, headers, timeout, verify_ssl
+                )
+            )
+            detection["manifest_checked"] = True
+            if manifest_error:
+                detection["manifest_error"] = manifest_error
+                if manifest_response is not None:
+                    manifest_response.close()
+            elif manifest_response is not None:
+                detection["manifest_status"] = manifest_response.status_code
+                if manifest_body:
+                    detection["evidence"].append("manifest")
+                    if not detection["version"]:
+                        detection["version"] = react_router_extract_version(
+                            manifest_body.decode("utf-8", "replace"),
+                            {
+                                name: value
+                                for name, value in manifest_response.headers.items()
+                            },
+                        )
+                manifest_response.close()
+
+        detection["affected"] = react_router_version_status(
+            detection["version"]
+        )
+        result["framework"] = detection
+        version = detection["version"]
+
+        if detection["affected"] is True:
+            result["vulnerable"] = None
+            result["verdict"] = "INCONCLUSIVE"
+            result["reason"] = (
+                f"React Router Framework Mode terdeteksi dengan versi "
+                f"{version} (rentang terdampak 7.0.0-7.14.1). Eksploitasi "
+                "CVE-2026-42211 memerlukan prototype pollution yang sudah ada "
+                "di aplikasi; konfirmasi manual diperlukan"
+            )
+        elif detection["affected"] is False:
+            result["vulnerable"] = False
+            result["verdict"] = "NOT VULNERABLE"
+            result["reason"] = (
+                f"React Router Framework Mode terdeteksi dengan versi "
+                f"{version}; versi ini tidak berada di rentang terdampak "
+                "CVE-2026-42211 (fixed 7.14.2)"
+            )
+        else:
+            result["vulnerable"] = None
+            result["verdict"] = "INCONCLUSIVE"
+            result["reason"] = (
+                "React Router Framework Mode terdeteksi, tetapi versi tidak "
+                "dapat dipastikan. Periksa package.json/build; eksploitasi "
+                "CVE-2026-42211 juga memerlukan prototype pollution"
+            )
+        return result
+
+    result["vulnerable"] = False
+    result["verdict"] = "NOT VULNERABLE"
+    result["reason"] = (
+        "React Router Framework Mode tidak terdeteksi pada path yang diuji"
+    )
+    return result
+
+
+# ---------------------------------------------------------------------------
 # Dispatcher, output, dan CLI
 # ---------------------------------------------------------------------------
 
@@ -2230,6 +2637,27 @@ def scan_host(
                 error_finding(
                     "react",
                     REACT_CVES,
+                    host_label,
+                    f"kesalahan tak terduga: {exc}",
+                )
+            )
+
+    if mode in ("react-router", "all"):
+        try:
+            findings.append(
+                react_router_check_vulnerability(
+                    host,
+                    timeout=react_timeout,
+                    verify_ssl=verify_ssl,
+                    custom_headers=custom_headers,
+                    paths=paths,
+                )
+            )
+        except Exception as exc:
+            findings.append(
+                error_finding(
+                    "react-router",
+                    REACT_ROUTER_CVES,
                     host_label,
                     f"kesalahan tak terduga: {exc}",
                 )
@@ -2460,7 +2888,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser = IndonesianArgumentParser(
         description=(
             "Scanner gabungan CVE PHP dan React. Memindai CVE-2026-109618, "
-            "CVE-2026-109619, CVE-2025-55182, dan CVE-2025-66478."
+            "CVE-2026-109619, CVE-2025-55182, CVE-2025-66478, dan "
+            "CVE-2026-42211 (React Router, pasif)."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
@@ -2469,6 +2898,7 @@ Contoh:
   %(prog)s -u https://example.com --mode php
   %(prog)s -u https://example.com --mode react
   %(prog)s -u https://example.com --mode react --rce
+  %(prog)s -u https://example.com --mode react-router
   %(prog)s -l hosts.txt --mode all -t 20 --rate-limit 5 -o hasil.json
   %(prog)s -u https://example.com --proxy http://127.0.0.1:8080
   %(prog)s -u https://example.com -H "Authorization: Bearer token"
@@ -2478,9 +2908,12 @@ Contoh:
     )
     parser.add_argument(
         "--mode",
-        choices=("php", "react", "all"),
+        choices=("php", "react", "react-router", "all"),
         default="all",
-        help="Engine yang dijalankan: php, react, atau all (default: all)",
+        help=(
+            "Engine yang dijalankan: php, react, react-router, atau all "
+            "(default: all)"
+        ),
     )
 
     input_group = parser.add_mutually_exclusive_group(required=True)
@@ -2496,7 +2929,10 @@ Contoh:
         "--timeout",
         type=int,
         default=None,
-        help="Timeout per permintaan dalam detik (default: PHP 60, React 10)",
+        help=(
+            "Timeout per permintaan dalam detik "
+            "(default: PHP 60, React/React Router 10)"
+        ),
     )
     parser.add_argument(
         "--rate-limit",
@@ -2730,7 +3166,8 @@ def main() -> None:
         mode_label = {
             "php": "PHP saja",
             "react": "React saja",
-            "all": "PHP + React",
+            "react-router": "React Router saja",
+            "all": "PHP + React + React Router",
         }[args.mode]
         print(colorize(f"[*] Mode: {mode_label}", Colors.CYAN))
         print(colorize(f"[*] Memuat {len(hosts)} host untuk dipindai", Colors.CYAN))
@@ -2761,6 +3198,14 @@ def main() -> None:
                 print(
                     colorize(
                         f"[*] Path default React: {REACT_DEFAULT_PATH}",
+                        Colors.CYAN,
+                    )
+                )
+            if args.mode in ("react-router", "all"):
+                print(
+                    colorize(
+                        "[*] Path default React Router: "
+                        f"{REACT_ROUTER_DEFAULT_PATH}",
                         Colors.CYAN,
                     )
                 )
@@ -2849,6 +3294,20 @@ def main() -> None:
                         Colors.CYAN,
                     )
                 )
+        if args.mode in ("react-router", "all"):
+            print(
+                colorize(
+                    f"[*] Timeout React Router: {react_timeout}s",
+                    Colors.CYAN,
+                )
+            )
+            print(
+                colorize(
+                    "[*] React Router: deteksi pasif Framework Mode "
+                    "(CVE-2026-42211)",
+                    Colors.CYAN,
+                )
+            )
         if args.insecure:
             print(colorize("[!] Verifikasi TLS dinonaktifkan", Colors.YELLOW))
         print()

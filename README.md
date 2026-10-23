@@ -2,6 +2,7 @@
 
 - **CVE-2026-109618 / CVE-2026-109619** (PHP multipart parsing)
 - **CVE-2025-55182 / CVE-2025-66478** (React Server Components / Next.js RCE)
+- **CVE-2026-42211** (React Router Framework Mode, deteksi pasif)
 
 ## Mulai Cepat
 
@@ -9,7 +10,7 @@
 # 1. Instal dependensi
 pip install -r requirements.txt
 
-# 2. Scan satu target (PHP + React)
+# 2. Scan satu target (PHP + React + React Router)
 python scanner.py -u https://example.com
 
 # 3. Pemindaian Banyak Target dari Berkas
@@ -23,10 +24,11 @@ Jika dijalankan tanpa argumen, scanner akan menampilkan panduan pemakaian singka
 
 ## Fitur
 
-- **Satu Perintah** — Memungkinkan pemindaian kedua jenis kerentanan sekaligus menggunakan opsi `--mode all` (mode bawaan).
+- **Satu Perintah** — Memungkinkan pemindaian ketiga jenis kerentanan sekaligus menggunakan opsi `--mode all` (mode bawaan).
 - **Fleksibel** — Mendukung pemindaian satu URL atau beberapa URL yang tercantum dalam berkas `.txt`.
-- **Mode Pemindaian Khusus** — Memungkinkan pemindaian khusus untuk PHP atau React.
-- **Deteksi Cerdas** — Mendukung identifikasi lingkungan `mod_php`, PHP-FPM, serta Next.js App Router dan Pages Router.
+- **Mode Pemindaian Khusus** — Memungkinkan pemindaian khusus untuk PHP, React/Next.js, atau React Router.
+- **Deteksi Cerdas** — Mendukung identifikasi lingkungan `mod_php`, PHP-FPM, Next.js App Router dan Pages Router, serta React Router Framework Mode.
+- **Deteksi React Router (Pasif)** — Mendeteksi Framework Mode dan versi React Router untuk CVE-2026-42211, tanpa mengirim payload eksploitasi. Hasil maksimal `TIDAK KONKLUSIF` karena eksploitasi memerlukan prototype pollution di aplikasi target.
 - **Baseline dan Fingerprinting** — Melakukan permintaan awal untuk mengidentifikasi keberadaan WAF/CDN dan mekanisme challenge sebelum menentukan hasil pemindaian.
 - **Pembatasan Laju dan Percobaan Ulang** — Mengatur frekuensi permintaan serta mengulangi permintaan yang mengalami kesalahan sementara dengan jeda bertahap (*backoff*).
 - **Dukungan Proxy Opsional** — Memungkinkan seluruh mesin pemindai menggunakan proxy HTTP/HTTPS atau terhubung langsung tanpa proxy.
@@ -60,17 +62,20 @@ python scanner.py -h
 ### 2) Scan satu target
 
 ```powershell
-# Scan keduanya (PHP + React) - default
+# Scan ketiganya (PHP + React + React Router) - default
 python scanner.py -u https://example.com
 
 # Hanya scan PHP
 python scanner.py -u https://example.com --mode php
 
-# Hanya scan React (safe side-channel, default)
+# Hanya scan React/Next.js (safe side-channel, default)
 python scanner.py -u https://example.com --mode react
 
-# React dengan RCE PoC (hanya untuk target berizin)
+# React/Next.js dengan RCE PoC (hanya untuk target berizin)
 python scanner.py -u https://example.com --mode react --rce
+
+# Hanya deteksi pasif React Router (CVE-2026-42211)
+python scanner.py -u https://example.com --mode react-router
 ```
 
 ### 3) Pemindaian Banyak Target dari Berkas
@@ -143,6 +148,15 @@ python scanner.py -l hosts.txt --all-results -o hasil-lengkap.json
 | `--waf-bypass-size KB` | Mengatur ukuran junk data (mis. `256`). |
 | `--vercel-waf-bypass` | Menggunakan varian payload khusus untuk bypass WAF Vercel (RCE PoC; memerlukan `--rce`). |
 
+### Khusus React Router (`--mode react-router`)
+
+| Opsi | Keterangan |
+|---|---|
+| `--path`, `--path-file` | Path yang diperiksa untuk halaman Framework Mode (default `/`). |
+| `--timeout` | Timeout permintaan React Router (default `10` detik). |
+
+Deteksi bersifat pasif: scanner mengambil halaman, mencari marker Framework Mode (`__reactRouterContext`, `__reactRouterManifest`, `__reactRouterRouteModules`), lalu mencoba membaca versi dari halaman, header, atau `/__manifest`. Tidak ada payload eksploitasi yang dikirim. CVE-2026-42211 hanya dapat dieksploitasi jika aplikasi sudah memiliki prototype pollution, sehingga hasil `[RENTAN]` tidak pernah dilaporkan untuk CVE ini.
+
 ### Opsi Jaringan
 
 | Opsi | Keterangan |
@@ -160,15 +174,18 @@ Header `Proxy-Authorization` yang diberikan lewat `-H` akan diabaikan agar tidak
 ## Batasan dan Catatan
 
 - Probe PHP dapat memicu kehabisan memori pada PHP yang sudah dipatch jika `memory_limit` rendah. Hasil `[RENTAN]` sebaiknya dikonfirmasi dengan versi PHP dan konfigurasi server; ini batasan deteksi aktif dari upstream.
-- PHP tidak mengikuti redirect. React mengikuti redirect hanya ke host yang sama dan tidak menurunkan HTTPS ke HTTP.
+- PHP tidak mengikuti redirect. React dan React Router mengikuti redirect hanya ke host yang sama dan tidak menurunkan HTTPS ke HTTP.
 - Query string dan fragment pada `-u` tidak dipertahankan oleh scanner saat ini. Jika endpoint membutuhkan query, gunakan alat/proxy tambahan atau sesuaikan path secara manual.
 - Baseline hanya memakai `GET`; target yang mewajibkan autentikasi atau hanya merespons `POST` bisa tidak terdeteksi sebagai WAF/CDN pada baseline.
+- Deteksi CVE-2026-42211 bersifat pasif dan bergantung pada marker Framework Mode. Aplikasi yang memakai Declarative/Data Mode, membungkus HTML secara agresif, atau menyembunyikan versi dapat dilaporkan `TIDAK RENTAN`/`TIDAK KONKLUSIF` secara keliru. Konfirmasi versi `react-router` melalui `package.json` atau artefak build.
+- CVE-2026-42211 memerlukan prototype pollution yang sudah ada di kode aplikasi. Deteksi versi rentan **bukan** bukti bahwa target dapat dieksploitasi.
+- Versi React Router sering tidak tersedia di HTML produksi. Jika versi tidak diketahui, hasilnya `TIDAK KONKLUSIF`, bukan `RENTAN`.
 
 ## Penjelasan Status Hasil
 
 | Status | Arti | Keterangan |
 |---|---|---|
-| `[RENTAN]` | Rentan terdeteksi | Terdapat indikator kerentanan untuk salah satu atau kedua CVE. |
+| `[RENTAN]` | Rentan terdeteksi | Terdapat indikator kerentanan untuk salah satu CVE yang didukung. CVE-2026-42211 tidak pernah menghasilkan status ini karena deteksinya pasif. |
 | `[TIDAK RENTAN]` | Tidak rentan | Tidak ditemukan indikator kerentanan pada pengujian yang dilakukan. |
 | `[TIDAK KONKLUSIF]` | Tidak bisa disimpulkan | Bisa karena diblokir WAF/CDN, redirect tidak terduga, atau respons tidak jelas. Jika baseline terdeteksi diblokir WAF/challenge, hasil "tidak rentan" otomatis diubah menjadi status ini. |
 | `[GALAT]` | Kesalahan koneksi/permintaan | Timeout, koneksi gagal, SSL error, dll. Perlu dicek koneksi atau sertifikat. |
@@ -201,7 +218,8 @@ Jika menggunakan `-o`, hasil akan disimpan dalam format seperti ini:
       "fingerprint": {
         "status_code": 200,
         "server": "nginx",
-        "tech": ["Next.js"],
+        "tech": ["Next.js", "React Router"],
+        "router_version": "7.13.1",
         "waf": ["Cloudflare"],
         "challenge": false,
         "blocked": false,
@@ -220,6 +238,22 @@ Jika menggunakan `-o`, hasil akan disimpan dalam format seperti ini:
           "vulnerable": true,
           "verdict": "VULNERABLE",
           "reason": "indikator kerentanan ditemukan pada respons"
+        },
+        {
+          "engine": "react-router",
+          "cve": "CVE-2026-42211",
+          "vulnerable": null,
+          "verdict": "INCONCLUSIVE",
+          "reason": "React Router Framework Mode terdeteksi dengan versi 7.13.1 (rentang terdampak 7.0.0-7.14.1)",
+          "framework": {
+            "detected": true,
+            "mode": "framework",
+            "version": "7.13.1",
+            "affected": true,
+            "manifest_path": "/__manifest",
+            "manifest_checked": true,
+            "evidence": ["__reactroutercontext", "manifest"]
+          }
         }
       ],
       "timestamp": "2026-10-23T..."
@@ -231,7 +265,8 @@ Jika menggunakan `-o`, hasil akan disimpan dalam format seperti ini:
 ## Tips Penggunaan
 
 - **Scan massal** - Gunakan `-t` secukupnya (10-20) dan pertimbangkan `--rate-limit` agar tidak terlalu agresif.
-- **Target spesifik** - Jika tahu aplikasinya berbasis Next.js, coba `--mode react` terlebih dahulu. Jika PHP tradisional, coba `--mode php`.
+- **Target spesifik** - Jika tahu aplikasinya berbasis Next.js, coba `--mode react` terlebih dahulu. Jika React Router Framework Mode, gunakan `--mode react-router`. Jika PHP tradisional, coba `--mode php`.
+- **React Router** - Gunakan `-v` untuk melihat marker/versi yang terdeteksi. Jika hasil `TIDAK KONKLUSIF` karena versi tidak diketahui, verifikasi manual melalui `package.json` atau artefak build (`react-router >= 7.14.2` aman).
 - **WAF aktif** - Perhatikan baris fingerprint/baseline. Jika diblokir, hasil bisa menjadi `TIDAK KONKLUSIF`; eskalasi ke `--rce` (React) hanya bila Anda berwenang.
 - **Debugging trafik** - Arahkan `--proxy` ke Burp/ZAP (mis. `http://127.0.0.1:8080`) untuk memeriksa request/response. Pastikan Anda berwenang atas target dan proxy tersebut.
 - **Periksa bukti** - Gunakan `-v` untuk melihat alasan verdict dan cuplikan respons saat menganalisis hasil yang mencurigakan. Request yang direkam (dengan body besar dipotong) dan data fingerprint juga tersimpan di JSON.
