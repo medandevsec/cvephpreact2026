@@ -186,10 +186,10 @@ Header `Proxy-Authorization` yang diberikan lewat `-H` akan diabaikan agar tidak
 
 | Status | Arti | Keterangan |
 |---|---|---|
-| `[RENTAN]` | Rentan terdeteksi | Terdapat indikator kerentanan untuk salah satu CVE yang didukung. CVE-2026-42211 tidak pernah menghasilkan status ini karena deteksinya pasif. |
-| `[TIDAK RENTAN]` | Tidak rentan | Tidak ditemukan indikator kerentanan pada pengujian yang dilakukan. |
-| `[TIDAK KONKLUSIF]` | Tidak bisa disimpulkan | Bisa karena diblokir WAF/CDN, redirect tidak terduga, atau respons tidak jelas. Jika baseline terdeteksi diblokir WAF/challenge, hasil "tidak rentan" otomatis diubah menjadi status ini. |
-| `[GALAT]` | Kesalahan koneksi/permintaan | Timeout, koneksi gagal, SSL error, dll. Perlu dicek koneksi atau sertifikat. |
+| `[RENTAN]` | Rentan terdeteksi | Terdapat indikator kuat kerentanan untuk salah satu CVE yang didukung. Hanya muncul jika ada sinyal crash/indikator eksploitasi yang jelas. **CVE-2026-42211** dan **CVE-2026-111497** tidak pernah menghasilkan status ini karena keduanya bersifat deteksi pasif. |
+| `[TIDAK RENTAN]` | Tidak rentan | Tidak ditemukan indikator kerentanan berdasarkan pengujian. Pada engine pasif (React Router, Node.js), status ini berarti tidak ada marker/indikasi yang relevan terdeteksi pada respons yang diperiksa. |
+| `[TIDAK KONKLUSIF]` | Tidak bisa disimpulkan | Cukup indikasi untuk dicurigai, namun **tidak cukup bukti** untuk menyimpulkan rentan atau tidak. Penyebab umum: diblokir WAF/CDN (mis. Cloudflare), probe ditolak (`400/403/413/429`), redirect tidak terduga, respons kosong/tidak jelas, baseline terdeteksi *challenge*, atau untuk deteksi pasif versi tidak terungkap (contoh React Router tanpa versi, Node.js terindikasi tanpa versi). Jika baseline mendeteksi diblokir/challenge, hasil "tidak rentan" bisa diubah menjadi status ini di level host. |
+| `[GALAT]` | Kesalahan koneksi/permintaan | Timeout, koneksi gagal, SSL error, atau kesalahan tak terduga saat pengujian. Perlu dicek koneksi, sertifikat, atau proxy. |
 
 ## Struktur Hasil JSON
 
