@@ -1,5 +1,7 @@
 # Scanner CVE PHP & React
 
+![Hasil Scan](CVEPHPREACTNODEJS.png)
+
 - **CVE-2026-109618 / CVE-2026-109619** (PHP multipart parsing)
 - **CVE-2025-55182 / CVE-2025-66478** (React Server Components / Next.js RCE)
 - **CVE-2026-42211** (React Router Framework Mode, deteksi pasif)
