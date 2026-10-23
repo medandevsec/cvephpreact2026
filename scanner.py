@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 # /// script
 # requires-python = ">=3.9"
 # dependencies = [
@@ -62,6 +62,7 @@ except ImportError:
 PHP_CVES = "CVE-2026-109618 / CVE-2026-109619"
 REACT_CVES = "CVE-2025-55182 / CVE-2025-66478"
 REACT_ROUTER_CVES = "CVE-2026-42211"
+NODEJS_BROTLI_CVES = "CVE-2026-111497"
 PHP_DEFAULT_PATH = "/index.php"
 REACT_DEFAULT_PATH = "/"
 REACT_ROUTER_DEFAULT_PATH = "/"
@@ -2351,6 +2352,133 @@ def react_router_base_result(host: str) -> dict:
     }
 
 
+# ---------------------------------------------------------------------------
+# Engine Node.js: CVE-2026-111497 (Brotli decoder) - passive
+# ---------------------------------------------------------------------------
+
+
+def nodejs_check_vulnerability(
+    host: str,
+    timeout: int = REACT_ROUTER_DEFAULT_TIMEOUT,
+    verify_ssl: bool = True,
+    custom_headers: Optional[Dict[str, str]] = None,
+    paths: Optional[List[str]] = None,
+) -> dict:
+    display_host = safe_url_label(host)
+    result = {
+        "engine": "nodejs",
+        "cve": NODEJS_BROTLI_CVES,
+        "host": display_host,
+        "vulnerable": None,
+        "verdict": "ERROR",
+        "status_code": None,
+        "error": None,
+        "reason": None,
+        "request": None,
+        "response": None,
+        "final_url": None,
+        "tested_url": None,
+        "timestamp": utc_now(),
+    }
+
+    try:
+        normalized = normalize_url(host, REACT_ROUTER_DEFAULT_PATH)
+    except ValueError as exc:
+        result["error"] = str(exc)
+        result["reason"] = str(exc)
+        return result
+
+    result["host"] = normalized
+    base_path = urlsplit(normalized).path or REACT_ROUTER_DEFAULT_PATH
+    test_paths = paths if paths else [base_path]
+
+    headers = {
+        "User-Agent": FINGERPRINT_USER_AGENT,
+        "Accept": "text/html,application/xhtml+xml,application/json;q=0.9,*/*;q=0.8",
+        "Accept-Encoding": "gzip, deflate, br",
+    }
+    if custom_headers:
+        for name, value in custom_headers.items():
+            if name.lower() != "proxy-authorization":
+                set_header(headers, name, value)
+
+    for idx, path in enumerate(test_paths):
+        path = path if path.startswith("/") else "/" + path
+        test_url = replace_path(normalized, path, REACT_ROUTER_DEFAULT_PATH)
+        result["tested_url"] = test_url
+        result["final_url"] = test_url
+        result["request"] = react_router_request_dump(test_url, headers)
+
+        response, body, final_url, error = react_router_fetch(
+            test_url, headers, timeout, verify_ssl
+        )
+
+        if error:
+            if response is not None:
+                response.close()
+            if idx < len(test_paths) - 1:
+                continue
+            result["error"] = error
+            result["reason"] = error
+            result["verdict"] = "ERROR"
+            return result
+
+        result["final_url"] = final_url
+        result["status_code"] = response.status_code
+        result["response"] = react_router_response_dump(response, body)
+
+        if response.status_code in REACT_BLOCKED_STATUSES:
+            if idx < len(test_paths) - 1:
+                continue
+            result["vulnerable"] = None
+            result["verdict"] = "INCONCLUSIVE"
+            result["reason"] = (
+                f"respons HTTP {response.status_code} dapat berupa blokir "
+                "WAF/autentikasi; keberadaan Node.js tidak dapat dipastikan"
+            )
+            return result
+
+        try:
+            lower = body.lower()
+        except Exception:
+            lower = b""
+        header_map = {name.lower(): value for name, value in response.headers.items()}
+        node_indicators = []
+        xpb = header_map.get("x-powered-by", "").lower()
+        if "express" in xpb or "node" in xpb:
+            node_indicators.append("x-powered-by")
+        if b"express" in lower:
+            node_indicators.append("body")
+        server = header_map.get("server", "").lower()
+        if server in ("node", "nodejs"):
+            node_indicators.append("server")
+        if b"node.js" in lower or b"nodejs" in lower:
+            node_indicators.append("body-node")
+
+        if not node_indicators:
+            if idx < len(test_paths) - 1:
+                continue
+            result["vulnerable"] = False
+            result["verdict"] = "NOT VULNERABLE"
+            result["reason"] = "Tidak ada indikasi aplikasi berbasis Node.js terdeteksi"
+            return result
+
+        result["vulnerable"] = None
+        result["verdict"] = "INCONCLUSIVE"
+        result["reason"] = (
+            "Indikasi Node.js terdeteksi (CVE-2026-111497). "
+            "Versi Node.js tidak muncul di respons HTTP. "
+            "Periksa `node -v` pada server/container; jika menggunakan Node.js < 22.23.4 / < 24.22.1 / < 26.12.1 atau EOL, perlu di-update ke versi patch."
+        )
+        return result
+
+    result["vulnerable"] = False
+    result["verdict"] = "NOT VULNERABLE"
+    result["reason"] = "Tidak ada indikasi Node.js pada path yang diuji"
+    return result
+
+
+
 def react_router_check_vulnerability(
     host: str,
     timeout: int = REACT_ROUTER_DEFAULT_TIMEOUT,
@@ -2663,6 +2791,27 @@ def scan_host(
                 )
             )
 
+    if mode in ("nodejs", "all"):
+        try:
+            findings.append(
+                nodejs_check_vulnerability(
+                    host,
+                    timeout=react_timeout,
+                    verify_ssl=verify_ssl,
+                    custom_headers=custom_headers,
+                    paths=paths,
+                )
+            )
+        except Exception as exc:
+            findings.append(
+                error_finding(
+                    "nodejs",
+                    NODEJS_BROTLI_CVES,
+                    host_label,
+                    f"kesalahan tak terduga: {exc}",
+                )
+            )
+
     if any(finding.get("vulnerable") is True for finding in findings):
         vulnerable: Optional[bool] = True
         verdict = "VULNERABLE"
@@ -2908,10 +3057,10 @@ Contoh:
     )
     parser.add_argument(
         "--mode",
-        choices=("php", "react", "react-router", "all"),
+        choices=("php", "react", "react-router", "nodejs", "all"),
         default="all",
         help=(
-            "Engine yang dijalankan: php, react, react-router, atau all "
+            "Engine yang dijalankan: php, react, react-router, nodejs, atau all "
             "(default: all)"
         ),
     )
@@ -3167,7 +3316,8 @@ def main() -> None:
             "php": "PHP saja",
             "react": "React saja",
             "react-router": "React Router saja",
-            "all": "PHP + React + React Router",
+            "nodejs": "Node.js saja",
+            "all": "PHP + React + React Router + Node.js",
         }[args.mode]
         print(colorize(f"[*] Mode: {mode_label}", Colors.CYAN))
         print(colorize(f"[*] Memuat {len(hosts)} host untuk dipindai", Colors.CYAN))
@@ -3412,3 +3562,7 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+
+
+
