@@ -3,6 +3,7 @@
 - **CVE-2026-109618 / CVE-2026-109619** (PHP multipart parsing)
 - **CVE-2025-55182 / CVE-2025-66478** (React Server Components / Next.js RCE)
 - **CVE-2026-42211** (React Router Framework Mode, deteksi pasif)
+- **CVE-2026-111497** (Node.js Brotli decoder, deteksi pasif)
 
 ## Mulai Cepat
 
@@ -10,7 +11,7 @@
 # 1. Instal dependensi
 pip install -r requirements.txt
 
-# 2. Scan satu target (PHP + React + React Router)
+# 2. Scan satu target (PHP + React + React Router + Node.js)
 python scanner.py -u https://example.com
 
 # 3. Pemindaian Banyak Target dari Berkas
