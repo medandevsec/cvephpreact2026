@@ -1,0 +1,14 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+hasil*.json
+result*.json
+all-results*.json
+hosts.txt
+
+poc_lab_*.txt
+unittest_*.txt
+.pytest_cache/
+.hackerai/
